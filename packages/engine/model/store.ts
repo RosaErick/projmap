@@ -43,6 +43,7 @@ export class Store {
     this.#state = {
       project,
       view: {
+        sourceRevisions: {},
         soloId: null,
         selectedIds: [],
         xray: false,
@@ -87,6 +88,7 @@ export class Store {
     const draft = structuredClone(before);
     fn(draft);
     this.#state = { ...this.#state, project: draft };
+    this.#reconcilePlayback(before);
     this.#emit();
   }
 
@@ -109,6 +111,7 @@ export class Store {
       project,
       view: {
         ...this.#state.view,
+        sourceRevisions: {},
         selectedIds: [],
         xray: false,
         playback: null,
@@ -131,18 +134,22 @@ export class Store {
   undo(): void {
     const prev = this.#undo.pop();
     if (!prev) return;
-    this.#redo.push(this.#state.project);
+    const before = this.#state.project;
+    this.#redo.push(before);
     this.#lastCoalesce = null;
     this.#state = { ...this.#state, project: prev };
+    this.#reconcilePlayback(before);
     this.#emit();
   }
 
   redo(): void {
     const next = this.#redo.pop();
     if (!next) return;
-    this.#undo.push(this.#state.project);
+    const before = this.#state.project;
+    this.#undo.push(before);
     this.#lastCoalesce = null;
     this.#state = { ...this.#state, project: next };
+    this.#reconcilePlayback(before);
     this.#emit();
   }
 
@@ -233,7 +240,6 @@ export class Store {
       // volta a ter um arquivo sem a chave, como antes de existir a feature.
       if (p.timeline.scenes.length === 0) delete p.timeline;
     });
-    this.#clampPlayback();
   }
 
   patchScene(id: string, patch: Partial<Pick<Scene, 'name' | 'hold' | 'fade'>>): void {
@@ -272,12 +278,15 @@ export class Store {
     const scenes = this.#state.project.timeline?.scenes;
     if (!scenes?.length) return;
     const current = this.#state.view.playback;
+    const since = Date.now();
+    const playing = opts.playing ?? current?.playing ?? false;
     this.setView({
       playback: {
         sceneIndex: Math.max(0, Math.min(scenes.length - 1, index)),
         fromIndex: current?.sceneIndex ?? null,
-        since: Date.now(),
-        playing: opts.playing ?? current?.playing ?? false,
+        since,
+        playing,
+        pausedAt: playing ? undefined : since,
       },
     });
   }
@@ -285,12 +294,18 @@ export class Store {
   play(): void {
     const playback = this.#state.view.playback;
     if (!playback) { this.goToScene(0, { playing: true }); return; }
-    this.setView({ playback: { ...playback, playing: true } });
+    if (playback.playing) return;
+    // DECISION: pause freezes the hold, while an entrance fade completes.
+    // Resuming must neither consume the paused hold nor replay that fade.
+    const fadeEnd = playback.since + (currentScene(this.#state)?.fade ?? 0) * 1000;
+    const heldAt = Math.max(fadeEnd, playback.pausedAt ?? playback.since);
+    const pausedFor = Math.max(0, Date.now() - heldAt);
+    this.setView({ playback: { ...playback, since: playback.since + pausedFor, playing: true, pausedAt: undefined } });
   }
 
   pause(): void {
     const playback = this.#state.view.playback;
-    if (playback) this.setView({ playback: { ...playback, playing: false } });
+    if (playback?.playing) this.setView({ playback: { ...playback, playing: false, pausedAt: Date.now() } });
   }
 
   /** Devolve o comando ao que está no projeto. */
@@ -322,14 +337,27 @@ export class Store {
     this.pause();
   }
 
-  /** Uma cena apagada pode ter deixado o playhead fora do fim da lista. */
-  #clampPlayback(): void {
+  /** Keep scene identities stable before notifying subscribers of an edit. */
+  #reconcilePlayback(before: Project): void {
     const playback = this.#state.view.playback;
-    const scenes = this.#state.project.timeline?.scenes;
     if (!playback) return;
-    if (!scenes?.length) { this.setView({ playback: null }); return; }
-    if (playback.sceneIndex < scenes.length) return;
-    this.setView({ playback: { ...playback, sceneIndex: scenes.length - 1, fromIndex: null } });
+    const scenes = this.#state.project.timeline?.scenes ?? [];
+    const currentId = before.timeline?.scenes[playback.sceneIndex]?.id;
+    const sceneIndex = scenes.findIndex((scene) => scene.id === currentId);
+    if (sceneIndex < 0) {
+      // DECISION: deleting the active scene returns control to the project,
+      // rather than putting an unrelated scene on the wall without a GO.
+      this.#state = { ...this.#state, view: { ...this.#state.view, playback: null } };
+      return;
+    }
+    const previousId = playback.fromIndex === null ? undefined : before.timeline?.scenes[playback.fromIndex]?.id;
+    const previousIndex = scenes.findIndex((scene) => scene.id === previousId);
+    const fromIndex = previousIndex < 0 ? null : previousIndex;
+    if (sceneIndex === playback.sceneIndex && fromIndex === playback.fromIndex) return;
+    this.#state = {
+      ...this.#state,
+      view: { ...this.#state.view, playback: { ...playback, sceneIndex, fromIndex } },
+    };
   }
 
   /**
@@ -639,6 +667,10 @@ export class Store {
 
   /** Aponta uma fonte de arquivo para outro arquivo — o "religar" do editor. */
   relinkSource(id: string, path: string): void {
+    const source = this.#state.project.sources.find((s) => s.id === id);
+    if (!source || !['canvas', 'image', 'gif', 'video'].includes(source.kind)) return;
+    const revisions = this.#state.view.sourceRevisions;
+    this.setView({ sourceRevisions: { ...revisions, [id]: (revisions[id] ?? 0) + 1 } });
     this.mutate((p) => {
       const s = p.sources.find((x) => x.id === id);
       if (!s) return;

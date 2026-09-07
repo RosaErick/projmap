@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store, visibleSurfaces, patternFor, presentationOf } from './store.ts';
+import { Store, currentScene, visibleSurfaces, patternFor, presentationOf } from './store.ts';
 import { anchorId, emptyProject } from './project.ts';
 import { surfaceOrder } from './surface-math.ts';
 import { isIdentity, evaluateWarp } from './warp.ts';
@@ -687,4 +687,117 @@ test('AC-78: valores impossíveis num text são corrigidos na leitura', () => {
   assert.equal(source.family, 'sans');
   assert.equal(source.align, 'center');
   assert.equal(source.weight, 700);
+});
+
+test('AC-103: pausing preserves the remaining hold when playback resumes', (t) => {
+  let now = 100_000;
+  t.mock.method(Date, 'now', () => now);
+  const { store } = showFixture();
+  store.captureScene('first');
+  store.captureScene('second');
+  store.patchScene(store.project.timeline!.scenes[0]!.id, { fade: 0, hold: 5 });
+  const saved = store.toJSON();
+  store.play();
+  now += 1000;
+  store.pause();
+  now += 60_000;
+  store.pause(); // Repeated pause must not forget when the hold stopped.
+  store.play();
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 0);
+  now += 3999;
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 0);
+  now++;
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 1);
+  assert.equal(store.toJSON(), saved);
+});
+
+test('AC-103: pausing during a fade preserves the hold without replaying the entrance', (t) => {
+  let now = 100_000;
+  t.mock.method(Date, 'now', () => now);
+  const { store, a } = showFixture();
+  store.setOpacity(a, 0.5);
+  store.captureScene('first');
+  store.captureScene('second');
+  store.patchScene(store.project.timeline!.scenes[0]!.id, { fade: 2, hold: 5 });
+  store.play();
+  now += 500;
+  store.pause();
+  now += 10_000;
+  store.play();
+  const surface = store.project.surfaces.find((s) => s.id === a)!;
+  assert.equal(presentationOf(store.state, surface).opacity, 0.5);
+  now += 4999;
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 0);
+  now++;
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 1);
+});
+
+test('AC-103: a parked scene gets its full hold on play', (t) => {
+  let now = 100_000;
+  t.mock.method(Date, 'now', () => now);
+  const { store } = showFixture();
+  store.captureScene('first');
+  store.captureScene('second');
+  store.patchScene(store.project.timeline!.scenes[0]!.id, { fade: 0, hold: 5 });
+  store.goToScene(0);
+  now += 60_000;
+  store.play();
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 0);
+  now += 5000;
+  store.play(); // Repeated play must not restart the clock.
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 1);
+});
+
+test('AC-104: deleting an earlier scene preserves the active scene through undo and redo', () => {
+  const { store } = showFixture();
+  for (const name of ['A', 'B', 'C']) store.captureScene(name);
+  const first = store.project.timeline!.scenes[0]!.id;
+  store.goToScene(1);
+  const active = currentScene(store.state)!.id;
+  const observed: (string | undefined)[] = [];
+  const off = store.subscribe((state) => observed.push(currentScene(state)?.id));
+  store.removeScene(first);
+  assert.equal(currentScene(store.state)?.id, active);
+  assert.equal(store.view.playback?.sceneIndex, 0);
+  assert.equal(store.view.playback?.fromIndex, null);
+  store.undo();
+  assert.equal(store.view.playback?.sceneIndex, 1);
+  store.redo();
+  assert.equal(store.view.playback?.sceneIndex, 0);
+  assert.ok(observed.every((id) => id === active), 'subscribers never see an unrelated scene');
+  off();
+});
+
+test('AC-104: reordering scenes preserves both ends of the active transition', () => {
+  const { store } = showFixture();
+  for (const name of ['A', 'B', 'C']) store.captureScene(name);
+  const [a, b, c] = store.project.timeline!.scenes;
+  store.goToScene(1, { playing: true });
+  store.goToScene(2);
+  const since = store.view.playback!.since;
+  store.moveScene(a!.id, 2);
+  assert.equal(currentScene(store.state)?.id, c!.id);
+  assert.equal(store.project.timeline!.scenes[store.view.playback!.fromIndex!]!.id, b!.id);
+  assert.equal(store.view.playback!.since, since);
+  assert.equal(store.view.playback!.playing, true);
+  store.undo();
+  assert.equal(store.view.playback!.sceneIndex, 2);
+  assert.equal(store.view.playback!.fromIndex, 1);
+});
+
+test('AC-104: deleting the active scene ejects playback instead of selecting another scene', () => {
+  const { store } = showFixture();
+  store.captureScene('A');
+  store.captureScene('B');
+  store.goToScene(0);
+  store.removeScene(currentScene(store.state)!.id);
+  assert.equal(store.view.playback, null);
+  assert.equal(store.project.timeline!.scenes.length, 1);
 });

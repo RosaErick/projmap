@@ -25,6 +25,7 @@ export class VideoTextureSource implements TextureSource {
   #hasRvfc = false;
   #rvfcHandle: number | null = null;
   #objectUrl: string | null = null;
+  #disposed = false;
 
   constructor() {
     const v = document.createElement('video') as VideoWithRVFC;
@@ -34,6 +35,7 @@ export class VideoTextureSource implements TextureSource {
     v.crossOrigin = 'anonymous';
     this.video = v;
     const measure = (): void => {
+      if (this.#disposed) return;
       // Firefox and Safari can report 0x0 for a live stream until the first
       // frame lands, and a webcam may renegotiate its resolution mid-session.
       // The track's own settings are the reliable answer when they do.
@@ -53,6 +55,7 @@ export class VideoTextureSource implements TextureSource {
     v.addEventListener('resize', measure);
     v.addEventListener('playing', measure);
     v.addEventListener('error', () => {
+      if (this.#disposed) return;
       this.status = 'error';
       this.error = { code: 'video-failed' };
     });
@@ -75,12 +78,18 @@ export class VideoTextureSource implements TextureSource {
     if (typeof v.requestVideoFrameCallback !== 'function') return;
     this.#hasRvfc = true;
     this.#rvfcHandle = v.requestVideoFrameCallback(() => {
+      if (this.#disposed) return;
       this.textures.invalidate();
       this.#scheduleFrame();
     });
   }
 
   protected setSrcObject(stream: MediaStream): void {
+    // Permission can resolve after the source was removed or replaced.
+    if (this.#disposed) {
+      for (const track of stream.getTracks()) track.stop();
+      return;
+    }
     this.video.srcObject = stream;
     // "Stop sharing" ends the track. Without this the surface would freeze on
     // its last frame and keep lying to whoever is looking at the wall.
@@ -94,6 +103,10 @@ export class VideoTextureSource implements TextureSource {
   }
 
   protected setSrcUrl(url: string, objectUrl = false): void {
+    if (this.#disposed) {
+      if (objectUrl) URL.revokeObjectURL(url);
+      return;
+    }
     if (objectUrl) this.#objectUrl = url;
     this.video.src = url;
     void this.video.play().catch(() => { /* unlocked by the first user gesture */ });
@@ -127,6 +140,8 @@ export class VideoTextureSource implements TextureSource {
   release(gl: WebGL2RenderingContext): void { this.textures.release(gl); }
 
   dispose(_gl: WebGL2RenderingContext): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
     if (this.#rvfcHandle !== null) this.video.cancelVideoFrameCallback?.(this.#rvfcHandle);
     const stream = this.video.srcObject;
     // Stopping the tracks is what turns the webcam light off. Skipping it leaves

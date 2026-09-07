@@ -1,4 +1,5 @@
 import type { CanvasModule, Store } from '../../engine/index.ts';
+import { parseProject } from '../../engine/model/project.ts';
 import { createSaver, safeName, type Saver } from './saver.ts';
 import { forgetFolder, recallFolder, rememberFolder } from './handle-store.ts';
 
@@ -38,6 +39,7 @@ let dir: DirHandle | null = null;
 const urlCache = new Map<string, string>();
 /** Session-only media for the no-folder fallback, keyed by the same relative path. */
 const memoryFiles = new Map<string, File>();
+let importQueue: Promise<void> = Promise.resolve();
 
 export function folderName(): string { return dir?.name ?? ''; }
 
@@ -46,17 +48,35 @@ export async function openFolder(): Promise<string | null> {
   const picker = (globalThis as unknown as {
     showDirectoryPicker(opts: { mode: 'readwrite' }): Promise<DirHandle>;
   }).showDirectoryPicker;
-  dir = await picker({ mode: 'readwrite' });
-  urlCache.clear();
+  const handle = await picker({ mode: 'readwrite' });
+  let json: string | null;
+  try { json = await readProject(handle); } catch (error) {
+    if ((error as DOMException | null)?.name !== 'NotFoundError') throw error;
+    json = null;
+  }
+  activateFolder(handle);
   // Guardar o handle é o que faz a próxima sessão não começar pelo diálogo do
   // sistema. Falhar aqui não pode derrubar a abertura que já deu certo.
-  void rememberFolder(dir).catch(() => {});
-  try {
-    const file = await (await dir.getFileHandle('project.json')).getFile();
-    return await file.text();
-  } catch {
-    return null; // an empty folder is a new project, not an error
-  }
+  void rememberFolder(handle).catch(() => {});
+  return json;
+}
+
+async function readProject(handle: DirHandle): Promise<string> {
+  const file = await (await handle.getFileHandle('project.json')).getFile();
+  const json = await file.text();
+  parseProject(JSON.parse(json));
+  return json;
+}
+
+function activateFolder(handle: DirHandle): void {
+  // A pending save belongs to the old destination. In-flight saves retain
+  // their own handle; later saves get a new saver bound to this folder.
+  saver?.cancel();
+  saver = null;
+  saverStore = null;
+  invalidateUrls();
+  memoryFiles.clear();
+  dir = handle;
 }
 
 /**
@@ -77,21 +97,20 @@ export type Permissioned = FileSystemDirectoryHandle & {
 
 /** Adota o handle e lê o `project.json`, ou desiste dele se a pasta sumiu. */
 async function adopt(handle: FileSystemDirectoryHandle): Promise<Adopted | null> {
-  dir = handle;
-  urlCache.clear();
+  let json: string;
   try {
-    const file = await (await handle.getFileHandle('project.json')).getFile();
-    return { state: 'granted', name: handle.name, json: await file.text() };
+    json = await readProject(handle);
   } catch (e) {
     // Pasta vazia é projeto novo. Pasta que não existe mais é outra coisa: o
     // handle está morto e insistir nele só produziria erro a cada salvamento.
     if ((e as DOMException | null)?.name === 'NotFoundError') {
-      dir = null;
       await forgetFolder();
       return null;
     }
-    return { state: 'granted', name: handle.name, json: null };
+    throw e;
   }
+  activateFolder(handle);
+  return { state: 'granted', name: handle.name, json };
 }
 
 /**
@@ -161,7 +180,7 @@ export async function resolveUrl(path: string): Promise<string> {
   const cached = urlCache.get(path);
   if (cached) return cached;
 
-  const mem = memoryFiles.get(path);
+  const mem = dir ? undefined : memoryFiles.get(path);
   if (mem) {
     const url = URL.createObjectURL(mem);
     urlCache.set(path, url);
@@ -172,19 +191,47 @@ export async function resolveUrl(path: string): Promise<string> {
   // Paths are relative and may contain folders: walk the segments.
   const parts = path.split('/').filter(Boolean);
   const name = parts.pop()!;
-  let d = dir;
+  const target = dir;
+  let d = target;
   for (const part of parts) d = await d.getDirectoryHandle(part);
   const file = await (await d.getFileHandle(name)).getFile();
+  if (dir !== target) throw new Error('Project folder changed while reading media');
   const url = URL.createObjectURL(file);
   urlCache.set(path, url);
   return url;
 }
 
 /** Copies a dropped file into the project folder and returns its relative path. */
-export async function importFile(file: File): Promise<string> {
-  const path = safeName(file.name);
-  if (dir) {
-    const handle = await dir.getFileHandle(path, { create: true });
+export function importFile(file: File): Promise<string> {
+  const target = dir;
+  // Serialize name allocation with writes, including simultaneous drops.
+  const imported = importQueue.then(() => copyFile(file, target));
+  importQueue = imported.then(() => {}, () => {});
+  return imported;
+}
+
+async function copyFile(file: File, target: DirHandle | null): Promise<string> {
+  const name = safeName(file.name);
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const extension = dot > 0 ? name.slice(dot) : '';
+  const exists = async (path: string): Promise<boolean> => {
+    if (!target) return memoryFiles.has(path);
+    try { await target.getFileHandle(path); return true; } catch (error) {
+      const code = (error as DOMException | null)?.name;
+      if (code === 'NotFoundError') return false;
+      if (code === 'TypeMismatchError') return true;
+      throw error;
+    }
+  };
+  let path = name;
+  let suffix = 2;
+  // project.json always belongs to the saver.
+  while (await exists(path) || path === 'project.json') {
+    path = `${stem}_${suffix++}${extension}`;
+  }
+  if (target) {
+    const handle = await target.getFileHandle(path, { create: true });
     const writable = await handle.createWritable();
     await writable.write(file);
     await writable.close();
@@ -230,12 +277,13 @@ function saverFor(
   if (saver && saverStore === store) return saver;
   saver?.cancel();
   saverStore = store;
+  const target = dir;
   saver = createSaver({
     delay: AUTOSAVE_MS,
     read: () => store.toJSON(),
     write: async (contents) => {
-      if (dir) {
-        const handle = await dir.getFileHandle('project.json', { create: true });
+      if (target) {
+        const handle = await target.getFileHandle('project.json', { create: true });
         const writable = await handle.createWritable();
         await writable.write(contents);
         await writable.close();
@@ -243,7 +291,7 @@ function saverFor(
         localStorage.setItem(LOCAL_KEY, contents);
       }
     },
-    onSaved: () => onSaved?.(dir ? dir.name : memoryLabel),
+    onSaved: () => { if (dir === target) onSaved?.(target ? target.name : memoryLabel); },
     onError: (error) => onError?.(`Não consegui salvar: ${String((error as Error).message ?? error)}`),
   });
   return saver;

@@ -39,6 +39,7 @@ export class Engine {
   #win: Window;
   #raf = 0;
   #dirty = true;
+  #wasFading = false;
   #running = false;
   #view: ViewTransform = IDENTITY_VIEW;
   #unsubscribe: () => void;
@@ -107,7 +108,7 @@ export class Engine {
     // only has anything to do when the source list itself changed — and when it
     // does, the store's notification has already marked the frame dirty.
     if (state.project.sources !== this.#syncedSources) {
-      this.pool.sync(gl, state.project.sources);
+      this.pool.sync(gl, state.project.sources, state.view.sourceRevisions);
       this.#syncedSources = state.project.sources;
     }
 
@@ -120,7 +121,12 @@ export class Engine {
     // Uma transição muda a opacidade continuamente sem escrever no store, então
     // ela precisa acordar o laço explicitamente. "Tocando" não bastaria nem
     // seria certo: cena parada com conteúdo parado não tem por que segurar a GPU.
-    if (!this.#dirty && !uploaded && !this.pool.hasAnimated && !isFading(state)) return;
+    const fading = isFading(state);
+    const sweeping = visibleSurfaces(state).some((surface) => patternFor(state, surface.id) === 'sweep');
+    // The first frame after a fade ends must draw its exact final state,
+    // even when the browser skipped the last part of the transition.
+    if (!this.#dirty && !uploaded && !this.pool.hasAnimated && !fading && !this.#wasFading && !sweeping) return;
+    this.#wasFading = fading;
     this.#dirty = false;
     this.renderFrame(state);
   }

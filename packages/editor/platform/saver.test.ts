@@ -100,3 +100,19 @@ test('AC-43: a dropped file name never escapes the project folder', () => {
   assert.equal(safeName('C:\\\\Users\\\\me\\\\clip.mov'), 'clip.mov');
   assert.equal(safeName('vídeo final (2).mov'), 'v_deo_final_2_.mov');
 });
+
+test('AC-98: cancelling an in-flight saver drops its queued follow-up', async () => {
+  const written: string[] = [];
+  let release = (): void => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const saver = createSaver({
+    read: () => 'old project',
+    write: async (json) => { written.push(json); await held; },
+  });
+  const first = saver.flush();
+  await saver.flush();
+  saver.cancel();
+  release();
+  await first;
+  assert.deepEqual(written, ['old project']);
+});

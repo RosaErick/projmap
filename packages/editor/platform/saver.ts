@@ -67,6 +67,7 @@ export function createSaver({ read, write, onSaved, onError, delay = 400 }: Save
     },
     cancel(): void {
       if (timer) { clearTimeout(timer); timer = null; }
+      queued = false;
     },
   };
 }

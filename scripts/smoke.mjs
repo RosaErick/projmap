@@ -72,6 +72,134 @@ await page.waitForFunction(() => Boolean(window.projMap), null, { timeout: 10_00
 
 check('AC-14: build abre por file:// e monta a engine', true);
 
+// A fresh browser context has no folder handle, even when the picker exists.
+const recoveryPage = await browser.newPage({ locale: 'pt-BR' });
+await recoveryPage.goto(pathToFileURL(build).href);
+await recoveryPage.waitForFunction(() => Boolean(window.projMap));
+await recoveryPage.evaluate(() => window.projMap.store.addSurface());
+await recoveryPage.waitForFunction(() => {
+  const json = localStorage.getItem('map-engine:project');
+  return json && JSON.parse(json).surfaces.length === 1;
+});
+await recoveryPage.reload();
+await recoveryPage.waitForFunction(() => Boolean(window.projMap));
+const recovered = await recoveryPage.evaluate(() => ({
+  picker: typeof window.showDirectoryPicker === 'function',
+  surfaces: window.projMap.store.project.surfaces.length,
+}));
+check('AC-96: browser autosave survives reload with the folder API available',
+  recovered.picker && recovered.surfaces === 1, JSON.stringify(recovered));
+await recoveryPage.close();
+
+// Drive the actual engine loop with deterministic frames; reading pixels must
+// not force a render, or the check would hide the missing final frame.
+const animationPage = await browser.newPage();
+await animationPage.goto(pathToFileURL(build).href);
+await animationPage.waitForFunction(() => Boolean(window.projMap));
+const fadeFrames = await animationPage.evaluate(() => {
+  const engine = window.projMap;
+  engine.stop();
+  const request = window.requestAnimationFrame;
+  const cancel = window.cancelAnimationFrame;
+  const clock = Date.now;
+  const render = engine.renderer.render.bind(engine.renderer);
+  let nextFrame;
+  let now = clock();
+  const pixels = [];
+  window.requestAnimationFrame = (fn) => { nextFrame = fn; return 1; };
+  window.cancelAnimationFrame = () => {};
+  Date.now = () => now;
+  try {
+    const { store } = engine;
+    const surface = store.addSurface();
+    store.addSource({ id: 'white', kind: 'color', name: '', rgb: [255, 255, 255] });
+    store.setSurfaceSource(surface.id, 'white');
+    store.captureScene('white');
+    store.patchScene(store.project.timeline.scenes[0].id, { fade: 1, hold: 0 });
+    store.setOpacity(surface.id, 0);
+    store.goToScene(0);
+    engine.resize(100, 100);
+    engine.setView({ scale: 0.04, tx: 0, ty: 0 });
+    engine.renderer.render = (...args) => {
+      render(...args);
+      const gl = engine.renderer.gl;
+      const pixel = new Uint8Array(4);
+      gl.readPixels(38, 78, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      pixels.push([...pixel]);
+    };
+    engine.start();
+    nextFrame();
+    now += 750;
+    nextFrame();
+    now += 500;
+    nextFrame();
+    nextFrame(); // A static scene must sleep again after its final frame.
+    return pixels;
+  } finally {
+    engine.stop();
+    engine.renderer.render = render;
+    window.requestAnimationFrame = request;
+    window.cancelAnimationFrame = cancel;
+    Date.now = clock;
+  }
+});
+check('AC-101: a fade draws its final pixels after skipped frames and then sleeps',
+  fadeFrames.length === 3 && fadeFrames[1][0] === 128 && fadeFrames[2][0] === 255,
+  JSON.stringify(fadeFrames));
+const sweepFrames = await animationPage.evaluate(() => {
+  const engine = window.projMap;
+  engine.stop();
+  const request = window.requestAnimationFrame;
+  const cancel = window.cancelAnimationFrame;
+  const clock = performance.now.bind(performance);
+  const render = engine.renderer.render.bind(engine.renderer);
+  let nextFrame;
+  let now = clock();
+  const hashes = [];
+  window.requestAnimationFrame = (fn) => { nextFrame = fn; return 1; };
+  window.cancelAnimationFrame = () => {};
+  performance.now = () => now;
+  try {
+    const { store } = engine;
+    store.load({ version: 1, output: { width: 100, height: 100 }, sources: [], surfaces: [] });
+    const surface = store.addSurface();
+    store.setSurfaceFrame(surface.id, [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }]);
+    engine.resize(100, 100);
+    engine.setView({ scale: 1, tx: 0, ty: 0 });
+    engine.renderer.render = (...args) => {
+      render(...args);
+      const gl = engine.renderer.gl;
+      const pixels = new Uint8Array(100 * 100 * 4);
+      gl.readPixels(0, 0, 100, 100, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      hashes.push(pixels.reduce((sum, value, i) => sum + value * (i + 1), 0));
+    };
+    const step = () => { now += 500; nextFrame(); };
+    store.setTestPattern('sweep');
+    engine.start();
+    step(); step(); step();
+    store.setSurfacePattern(surface.id, 'none');
+    step(); step();
+    const stopped = hashes.length;
+    store.setTestPattern('none');
+    store.setSurfacePattern(surface.id, 'sweep');
+    step(); step();
+    store.toggleVisible(surface.id);
+    step(); step();
+    return { hashes, stopped };
+  } finally {
+    engine.stop();
+    engine.renderer.render = render;
+    window.requestAnimationFrame = request;
+    window.cancelAnimationFrame = cancel;
+    performance.now = clock;
+  }
+});
+check('AC-102: visible global and surface sweeps animate without keeping hidden patterns awake',
+  sweepFrames.stopped === 4 && sweepFrames.hashes.length === 7
+    && new Set(sweepFrames.hashes.slice(0, 3)).size === 3
+    && sweepFrames.hashes[4] !== sweepFrames.hashes[5], JSON.stringify(sweepFrames));
+await animationPage.close();
+
 /** Reads a pixel straight out of the GL buffer, right after a forced frame. */
 async function pixel(x, y) {
   return page.evaluate(([px, py]) => {
@@ -471,29 +599,51 @@ await page.evaluate(() => {
   store.setSurfaceSource(surface.id, 'green');
   store.captureScene('verde');
   const scenes = store.project.timeline.scenes;
-  store.patchScene(scenes[0].id, { hold: 0.4, fade: 0 });
-  store.patchScene(scenes[1].id, { hold: 0.4, fade: 0 });
+  store.patchScene(scenes[0].id, { hold: 0.7, fade: 0 });
+  store.patchScene(scenes[1].id, { hold: 0.7, fade: 0 });
   store.setLoop(true);
   store.eject();
 });
-await page.waitForTimeout(250);
+await page.waitForTimeout(600);
 
 const showBefore = await page.evaluate(() => ({
   json: window.projMap.store.toJSON(),
   canUndo: window.projMap.store.canUndo,
 }));
-await page.evaluate(() => window.projMap.store.play());
+await page.evaluate(() => {
+  window.autosaveProbe = { writes: 0, original: Storage.prototype.setItem };
+  Storage.prototype.setItem = function (key, value) {
+    if (key === 'map-engine:project') window.autosaveProbe.writes++;
+    return window.autosaveProbe.original.call(this, key, value);
+  };
+  window.projMap.store.play();
+});
 await page.waitForTimeout(2200);
 const showAfter = await page.evaluate(() => ({
   json: window.projMap.store.toJSON(),
   canUndo: window.projMap.store.canUndo,
   index: window.projMap.store.view.playback?.sceneIndex ?? -1,
   cycled: window.projMap.store.view.playback?.playing === true,
+  writes: window.autosaveProbe.writes,
 }));
 await page.evaluate(() => window.projMap.store.eject());
 check('AC-85: um ciclo inteiro de timeline não escreve um byte no projeto',
   showBefore.json === showAfter.json && showBefore.canUndo === showAfter.canUndo && showAfter.cycled,
   `json igual=${showBefore.json === showAfter.json} desfazer igual=${showBefore.canUndo === showAfter.canUndo} parou na cena ${showAfter.index}`);
+
+await page.evaluate(() => {
+  const { store } = window.projMap;
+  store.patchSurface(store.project.surfaces[0].id, { name: 'Autosave check' });
+});
+await page.waitForFunction(() => JSON.parse(localStorage.getItem('map-engine:project'))
+  ?.surfaces[0]?.name === 'Autosave check');
+const editedWrites = await page.evaluate(() => {
+  Storage.prototype.setItem = window.autosaveProbe.original;
+  return window.autosaveProbe.writes;
+});
+check('AC-105: timeline playback performs no autosaves while project edits still persist',
+  showAfter.writes === 0 && editedWrites > 0,
+  `playback=${showAfter.writes} after edit=${editedWrites}`);
 
 // Texto como conteúdo. O que se prova aqui é o encaixe com a regra central da
 // ferramenta: preto é ausência de luz, então uma fonte de texto não precisa —
