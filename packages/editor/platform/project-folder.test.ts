@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { importFile, resolveUrl, restoreFrom, type Permissioned } from './project-folder.ts';
+import { importFile, resolveUrl, restoreFrom, save, scheduleSave, type Permissioned } from './project-folder.ts';
+import { Store } from '../../engine/model/store.ts';
 
 /** Um handle de mentira: o de verdade só sai de um diálogo do sistema, que
  *  nenhum teste consegue operar. */
@@ -10,12 +11,15 @@ function fakeHandle(opts: {
   missing?: boolean;
   onRequest?: () => void;
   files?: Map<string, string>;
+  onWrite?: (json: string) => void;
+  readError?: string;
 }): Permissioned {
   return {
     name: 'palco',
     async queryPermission() { return opts.permission; },
     async requestPermission() { opts.onRequest?.(); return opts.permission; },
     async getFileHandle(path: string, options?: { create?: boolean }) {
+      if (opts.readError) throw new DOMException('Read failed', opts.readError);
       if (opts.files && path !== 'project.json') {
         if (!opts.files.has(path) && !options?.create) throw new DOMException('Missing file', 'NotFoundError');
         return {
@@ -38,7 +42,15 @@ function fakeHandle(opts: {
         e.name = 'NotFoundError';
         throw e;
       }
-      return { async getFile() { return { async text() { return opts.json; } }; } };
+      return {
+        async getFile() { return { async text() { return opts.json; } }; },
+        async createWritable() {
+          return {
+            async write(json: string) { opts.onWrite?.(json); },
+            async close() {},
+          };
+        },
+      };
     },
   } as unknown as Permissioned;
 }
@@ -80,4 +92,28 @@ test('AC-57: permissão negada não vira botão para insistir', async () => {
 
 test('AC-58: handle cuja pasta sumiu é esquecido em vez de adotado', async () => {
   assert.equal(await restoreFrom(fakeHandle({ permission: 'granted', missing: true })), null);
+});
+
+test('AC-98: failed folder validation preserves the previous save destination', async () => {
+  const written: string[] = [];
+  const store = new Store();
+  store.addSurface();
+  await restoreFrom(fakeHandle({ permission: 'granted', json: '{"version":1}', onWrite: (json) => written.push(json) }));
+  for (const invalid of [{ json: '{broken' }, { json: '{"version":99}' }, { readError: 'NotReadableError' }]) {
+    await assert.rejects(restoreFrom(fakeHandle({ permission: 'granted', ...invalid })));
+    await save(store);
+  }
+  assert.deepEqual(written, Array<string>(3).fill(store.toJSON()));
+});
+
+test('AC-98: switching folders cancels a pending save before adopting the new destination', async () => {
+  const written: string[] = [];
+  const store = new Store();
+  await restoreFrom(fakeHandle({ permission: 'granted', json: '{"version":1}' }));
+  scheduleSave(store);
+  await restoreFrom(fakeHandle({ permission: 'granted', json: '{"version":1}', onWrite: (json) => written.push(json) }));
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  assert.deepEqual(written, []);
+  await save(store);
+  assert.deepEqual(written, [store.toJSON()]);
 });

@@ -1,4 +1,5 @@
 import type { CanvasModule, Store } from '../../engine/index.ts';
+import { parseProject } from '../../engine/model/project.ts';
 import { createSaver, safeName, type Saver } from './saver.ts';
 import { forgetFolder, recallFolder, rememberFolder } from './handle-store.ts';
 
@@ -47,17 +48,34 @@ export async function openFolder(): Promise<string | null> {
   const picker = (globalThis as unknown as {
     showDirectoryPicker(opts: { mode: 'readwrite' }): Promise<DirHandle>;
   }).showDirectoryPicker;
-  dir = await picker({ mode: 'readwrite' });
-  urlCache.clear();
+  const handle = await picker({ mode: 'readwrite' });
+  let json: string | null;
+  try { json = await readProject(handle); } catch (error) {
+    if ((error as DOMException | null)?.name !== 'NotFoundError') throw error;
+    json = null;
+  }
+  activateFolder(handle);
   // Guardar o handle é o que faz a próxima sessão não começar pelo diálogo do
   // sistema. Falhar aqui não pode derrubar a abertura que já deu certo.
-  void rememberFolder(dir).catch(() => {});
-  try {
-    const file = await (await dir.getFileHandle('project.json')).getFile();
-    return await file.text();
-  } catch {
-    return null; // an empty folder is a new project, not an error
-  }
+  void rememberFolder(handle).catch(() => {});
+  return json;
+}
+
+async function readProject(handle: DirHandle): Promise<string> {
+  const file = await (await handle.getFileHandle('project.json')).getFile();
+  const json = await file.text();
+  parseProject(JSON.parse(json));
+  return json;
+}
+
+function activateFolder(handle: DirHandle): void {
+  // A pending save belongs to the old destination. In-flight saves retain
+  // their own handle; later saves get a new saver bound to this folder.
+  saver?.cancel();
+  saver = null;
+  saverStore = null;
+  dir = handle;
+  urlCache.clear();
 }
 
 /**
@@ -78,21 +96,20 @@ export type Permissioned = FileSystemDirectoryHandle & {
 
 /** Adota o handle e lê o `project.json`, ou desiste dele se a pasta sumiu. */
 async function adopt(handle: FileSystemDirectoryHandle): Promise<Adopted | null> {
-  dir = handle;
-  urlCache.clear();
+  let json: string;
   try {
-    const file = await (await handle.getFileHandle('project.json')).getFile();
-    return { state: 'granted', name: handle.name, json: await file.text() };
+    json = await readProject(handle);
   } catch (e) {
     // Pasta vazia é projeto novo. Pasta que não existe mais é outra coisa: o
     // handle está morto e insistir nele só produziria erro a cada salvamento.
     if ((e as DOMException | null)?.name === 'NotFoundError') {
-      dir = null;
       await forgetFolder();
       return null;
     }
-    return { state: 'granted', name: handle.name, json: null };
+    throw e;
   }
+  activateFolder(handle);
+  return { state: 'granted', name: handle.name, json };
 }
 
 /**
@@ -257,12 +274,13 @@ function saverFor(
   if (saver && saverStore === store) return saver;
   saver?.cancel();
   saverStore = store;
+  const target = dir;
   saver = createSaver({
     delay: AUTOSAVE_MS,
     read: () => store.toJSON(),
     write: async (contents) => {
-      if (dir) {
-        const handle = await dir.getFileHandle('project.json', { create: true });
+      if (target) {
+        const handle = await target.getFileHandle('project.json', { create: true });
         const writable = await handle.createWritable();
         await writable.write(contents);
         await writable.close();
@@ -270,7 +288,7 @@ function saverFor(
         localStorage.setItem(LOCAL_KEY, contents);
       }
     },
-    onSaved: () => onSaved?.(dir ? dir.name : memoryLabel),
+    onSaved: () => { if (dir === target) onSaved?.(target ? target.name : memoryLabel); },
     onError: (error) => onError?.(`Não consegui salvar: ${String((error as Error).message ?? error)}`),
   });
   return saver;

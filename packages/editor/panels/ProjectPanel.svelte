@@ -52,20 +52,24 @@
   /** Reabre a pasta da sessão anterior. Precisa estar dentro do clique: é o
    *  gesto do usuário que dá ao app o direito de pedir a permissão. */
   async function onReopen(): Promise<void> {
-    const restored = await grantFolder();
-    if (!restored) {
-      // Negar é uma resposta legítima. O botão some porque insistir com ele a
-      // cada abertura seria pior do que aceitar o não.
+    try {
+      const restored = await grantFolder();
+      if (!restored) {
+        // Negar é uma resposta legítima. O botão some porque insistir com ele a
+        // cada abertura seria pior do que aceitar o não.
+        session.pendingFolder = '';
+        flash(t('warn.folderFailed'));
+        return;
+      }
+      invalidateUrls();
+      if (restored.json) store.load(restored.json);
       session.pendingFolder = '';
+      session.hasFolder = true;
+      session.folderName = restored.name;
+      flash(restored.json ? t('project.loaded') : t('project.emptyFolder'));
+    } catch {
       flash(t('warn.folderFailed'));
-      return;
     }
-    invalidateUrls();
-    if (restored.json) store.load(restored.json);
-    session.pendingFolder = '';
-    session.hasFolder = true;
-    session.folderName = restored.name;
-    flash(restored.json ? t('project.loaded') : t('project.emptyFolder'));
   }
 
   /** Códigos da janela de saída viram frase aqui: quem abre a janela não escolhe
