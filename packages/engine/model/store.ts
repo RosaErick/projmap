@@ -274,12 +274,15 @@ export class Store {
     const scenes = this.#state.project.timeline?.scenes;
     if (!scenes?.length) return;
     const current = this.#state.view.playback;
+    const since = Date.now();
+    const playing = opts.playing ?? current?.playing ?? false;
     this.setView({
       playback: {
         sceneIndex: Math.max(0, Math.min(scenes.length - 1, index)),
         fromIndex: current?.sceneIndex ?? null,
-        since: Date.now(),
-        playing: opts.playing ?? current?.playing ?? false,
+        since,
+        playing,
+        pausedAt: playing ? undefined : since,
       },
     });
   }
@@ -287,12 +290,18 @@ export class Store {
   play(): void {
     const playback = this.#state.view.playback;
     if (!playback) { this.goToScene(0, { playing: true }); return; }
-    this.setView({ playback: { ...playback, playing: true } });
+    if (playback.playing) return;
+    // DECISION: pause freezes the hold, while an entrance fade completes.
+    // Resuming must neither consume the paused hold nor replay that fade.
+    const fadeEnd = playback.since + (currentScene(this.#state)?.fade ?? 0) * 1000;
+    const heldAt = Math.max(fadeEnd, playback.pausedAt ?? playback.since);
+    const pausedFor = Math.max(0, Date.now() - heldAt);
+    this.setView({ playback: { ...playback, since: playback.since + pausedFor, playing: true, pausedAt: undefined } });
   }
 
   pause(): void {
     const playback = this.#state.view.playback;
-    if (playback) this.setView({ playback: { ...playback, playing: false } });
+    if (playback?.playing) this.setView({ playback: { ...playback, playing: false, pausedAt: Date.now() } });
   }
 
   /** Devolve o comando ao que está no projeto. */

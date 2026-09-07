@@ -688,3 +688,69 @@ test('AC-78: valores impossíveis num text são corrigidos na leitura', () => {
   assert.equal(source.align, 'center');
   assert.equal(source.weight, 700);
 });
+
+test('AC-103: pausing preserves the remaining hold when playback resumes', (t) => {
+  let now = 100_000;
+  t.mock.method(Date, 'now', () => now);
+  const { store } = showFixture();
+  store.captureScene('first');
+  store.captureScene('second');
+  store.patchScene(store.project.timeline!.scenes[0]!.id, { fade: 0, hold: 5 });
+  const saved = store.toJSON();
+  store.play();
+  now += 1000;
+  store.pause();
+  now += 60_000;
+  store.pause(); // Repeated pause must not forget when the hold stopped.
+  store.play();
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 0);
+  now += 3999;
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 0);
+  now++;
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 1);
+  assert.equal(store.toJSON(), saved);
+});
+
+test('AC-103: pausing during a fade preserves the hold without replaying the entrance', (t) => {
+  let now = 100_000;
+  t.mock.method(Date, 'now', () => now);
+  const { store, a } = showFixture();
+  store.setOpacity(a, 0.5);
+  store.captureScene('first');
+  store.captureScene('second');
+  store.patchScene(store.project.timeline!.scenes[0]!.id, { fade: 2, hold: 5 });
+  store.play();
+  now += 500;
+  store.pause();
+  now += 10_000;
+  store.play();
+  const surface = store.project.surfaces.find((s) => s.id === a)!;
+  assert.equal(presentationOf(store.state, surface).opacity, 0.5);
+  now += 4999;
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 0);
+  now++;
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 1);
+});
+
+test('AC-103: a parked scene gets its full hold on play', (t) => {
+  let now = 100_000;
+  t.mock.method(Date, 'now', () => now);
+  const { store } = showFixture();
+  store.captureScene('first');
+  store.captureScene('second');
+  store.patchScene(store.project.timeline!.scenes[0]!.id, { fade: 0, hold: 5 });
+  store.goToScene(0);
+  now += 60_000;
+  store.play();
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 0);
+  now += 5000;
+  store.play(); // Repeated play must not restart the clock.
+  store.advanceIfDue();
+  assert.equal(store.view.playback?.sceneIndex, 1);
+});

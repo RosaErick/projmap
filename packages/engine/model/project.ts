@@ -189,6 +189,8 @@ export interface ViewState {
     fromIndex: number | null;
     since: number;
     playing: boolean;
+    /** Hold time stops here while an entrance fade may still finish. */
+    pausedAt?: number;
   } | null;
   /** Applies to every surface without one of its own. */
   testPattern: TestPattern;
