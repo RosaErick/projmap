@@ -32,9 +32,11 @@
 
   // Autosave a cada mudança. Meia hora de alinhamento não pode depender de
   // alguém lembrar de Ctrl+S em cima de uma escada.
+  // Derived identity filters notifications that only change the view.
+  const project = $derived($store.project);
   let firstRun = true;
   $effect(() => {
-    void $store.project;
+    void project;
     if (firstRun) { firstRun = false; return; }
     scheduleSave(store, (where) => {
       session.folderName = where;

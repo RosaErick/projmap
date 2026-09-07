@@ -599,29 +599,51 @@ await page.evaluate(() => {
   store.setSurfaceSource(surface.id, 'green');
   store.captureScene('verde');
   const scenes = store.project.timeline.scenes;
-  store.patchScene(scenes[0].id, { hold: 0.4, fade: 0 });
-  store.patchScene(scenes[1].id, { hold: 0.4, fade: 0 });
+  store.patchScene(scenes[0].id, { hold: 0.7, fade: 0 });
+  store.patchScene(scenes[1].id, { hold: 0.7, fade: 0 });
   store.setLoop(true);
   store.eject();
 });
-await page.waitForTimeout(250);
+await page.waitForTimeout(600);
 
 const showBefore = await page.evaluate(() => ({
   json: window.projMap.store.toJSON(),
   canUndo: window.projMap.store.canUndo,
 }));
-await page.evaluate(() => window.projMap.store.play());
+await page.evaluate(() => {
+  window.autosaveProbe = { writes: 0, original: Storage.prototype.setItem };
+  Storage.prototype.setItem = function (key, value) {
+    if (key === 'map-engine:project') window.autosaveProbe.writes++;
+    return window.autosaveProbe.original.call(this, key, value);
+  };
+  window.projMap.store.play();
+});
 await page.waitForTimeout(2200);
 const showAfter = await page.evaluate(() => ({
   json: window.projMap.store.toJSON(),
   canUndo: window.projMap.store.canUndo,
   index: window.projMap.store.view.playback?.sceneIndex ?? -1,
   cycled: window.projMap.store.view.playback?.playing === true,
+  writes: window.autosaveProbe.writes,
 }));
 await page.evaluate(() => window.projMap.store.eject());
 check('AC-85: um ciclo inteiro de timeline não escreve um byte no projeto',
   showBefore.json === showAfter.json && showBefore.canUndo === showAfter.canUndo && showAfter.cycled,
   `json igual=${showBefore.json === showAfter.json} desfazer igual=${showBefore.canUndo === showAfter.canUndo} parou na cena ${showAfter.index}`);
+
+await page.evaluate(() => {
+  const { store } = window.projMap;
+  store.patchSurface(store.project.surfaces[0].id, { name: 'Autosave check' });
+});
+await page.waitForFunction(() => JSON.parse(localStorage.getItem('map-engine:project'))
+  ?.surfaces[0]?.name === 'Autosave check');
+const editedWrites = await page.evaluate(() => {
+  Storage.prototype.setItem = window.autosaveProbe.original;
+  return window.autosaveProbe.writes;
+});
+check('AC-105: timeline playback performs no autosaves while project edits still persist',
+  showAfter.writes === 0 && editedWrites > 0,
+  `playback=${showAfter.writes} after edit=${editedWrites}`);
 
 // Texto como conteúdo. O que se prova aqui é o encaixe com a regra central da
 // ferramenta: preto é ausência de luz, então uma fonte de texto não precisa —
