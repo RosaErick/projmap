@@ -122,9 +122,10 @@ export class Engine {
     // ela precisa acordar o laço explicitamente. "Tocando" não bastaria nem
     // seria certo: cena parada com conteúdo parado não tem por que segurar a GPU.
     const fading = isFading(state);
+    const sweeping = visibleSurfaces(state).some((surface) => patternFor(state, surface.id) === 'sweep');
     // The first frame after a fade ends must draw its exact final state,
     // even when the browser skipped the last part of the transition.
-    if (!this.#dirty && !uploaded && !this.pool.hasAnimated && !fading && !this.#wasFading) return;
+    if (!this.#dirty && !uploaded && !this.pool.hasAnimated && !fading && !this.#wasFading && !sweeping) return;
     this.#wasFading = fading;
     this.#dirty = false;
     this.renderFrame(state);

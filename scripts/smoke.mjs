@@ -146,6 +146,58 @@ const fadeFrames = await animationPage.evaluate(() => {
 check('AC-101: a fade draws its final pixels after skipped frames and then sleeps',
   fadeFrames.length === 3 && fadeFrames[1][0] === 128 && fadeFrames[2][0] === 255,
   JSON.stringify(fadeFrames));
+const sweepFrames = await animationPage.evaluate(() => {
+  const engine = window.projMap;
+  engine.stop();
+  const request = window.requestAnimationFrame;
+  const cancel = window.cancelAnimationFrame;
+  const clock = performance.now.bind(performance);
+  const render = engine.renderer.render.bind(engine.renderer);
+  let nextFrame;
+  let now = clock();
+  const hashes = [];
+  window.requestAnimationFrame = (fn) => { nextFrame = fn; return 1; };
+  window.cancelAnimationFrame = () => {};
+  performance.now = () => now;
+  try {
+    const { store } = engine;
+    store.load({ version: 1, output: { width: 100, height: 100 }, sources: [], surfaces: [] });
+    const surface = store.addSurface();
+    store.setSurfaceFrame(surface.id, [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }]);
+    engine.resize(100, 100);
+    engine.setView({ scale: 1, tx: 0, ty: 0 });
+    engine.renderer.render = (...args) => {
+      render(...args);
+      const gl = engine.renderer.gl;
+      const pixels = new Uint8Array(100 * 100 * 4);
+      gl.readPixels(0, 0, 100, 100, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      hashes.push(pixels.reduce((sum, value, i) => sum + value * (i + 1), 0));
+    };
+    const step = () => { now += 500; nextFrame(); };
+    store.setTestPattern('sweep');
+    engine.start();
+    step(); step(); step();
+    store.setSurfacePattern(surface.id, 'none');
+    step(); step();
+    const stopped = hashes.length;
+    store.setTestPattern('none');
+    store.setSurfacePattern(surface.id, 'sweep');
+    step(); step();
+    store.toggleVisible(surface.id);
+    step(); step();
+    return { hashes, stopped };
+  } finally {
+    engine.stop();
+    engine.renderer.render = render;
+    window.requestAnimationFrame = request;
+    window.cancelAnimationFrame = cancel;
+    performance.now = clock;
+  }
+});
+check('AC-102: visible global and surface sweeps animate without keeping hidden patterns awake',
+  sweepFrames.stopped === 4 && sweepFrames.hashes.length === 7
+    && new Set(sweepFrames.hashes.slice(0, 3)).size === 3
+    && sweepFrames.hashes[4] !== sweepFrames.hashes[5], JSON.stringify(sweepFrames));
 await animationPage.close();
 
 /** Reads a pixel straight out of the GL buffer, right after a forced frame. */
