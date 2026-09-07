@@ -117,3 +117,17 @@ test('AC-98: switching folders cancels a pending save before adopting the new de
   await save(store);
   assert.deepEqual(written, [store.toJSON()]);
 });
+
+test('AC-99: opening a folder replaces cached session media with that folder content', async () => {
+  const url = new URL('./project-folder.ts?media-isolation', import.meta.url);
+  const media = await import(url.href) as typeof import('./project-folder.ts');
+  await media.importFile(new File(['session'], 'clip.png'));
+  const previous = await media.resolveUrl('clip.png');
+  assert.equal(await (await fetch(previous)).text(), 'session');
+  await media.restoreFrom(fakeHandle({
+    permission: 'granted', json: '{"version":1}', files: new Map([['clip.png', 'folder']]),
+  }));
+  assert.equal(await (await fetch(await media.resolveUrl('clip.png'))).text(), 'folder');
+  await assert.rejects(fetch(previous), 'the old blob URL must be revoked');
+  media.invalidateUrls();
+});

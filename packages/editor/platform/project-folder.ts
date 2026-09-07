@@ -74,8 +74,9 @@ function activateFolder(handle: DirHandle): void {
   saver?.cancel();
   saver = null;
   saverStore = null;
+  invalidateUrls();
+  memoryFiles.clear();
   dir = handle;
-  urlCache.clear();
 }
 
 /**
@@ -179,7 +180,7 @@ export async function resolveUrl(path: string): Promise<string> {
   const cached = urlCache.get(path);
   if (cached) return cached;
 
-  const mem = memoryFiles.get(path);
+  const mem = dir ? undefined : memoryFiles.get(path);
   if (mem) {
     const url = URL.createObjectURL(mem);
     urlCache.set(path, url);
@@ -190,9 +191,11 @@ export async function resolveUrl(path: string): Promise<string> {
   // Paths are relative and may contain folders: walk the segments.
   const parts = path.split('/').filter(Boolean);
   const name = parts.pop()!;
-  let d = dir;
+  const target = dir;
+  let d = target;
   for (const part of parts) d = await d.getDirectoryHandle(part);
   const file = await (await d.getFileHandle(name)).getFile();
+  if (dir !== target) throw new Error('Project folder changed while reading media');
   const url = URL.createObjectURL(file);
   urlCache.set(path, url);
   return url;
