@@ -32,18 +32,20 @@ export function createSource(desc: Source, ctx: SourceContext): TextureSource {
  * file path), and merely patches one it can (a colour, a playback rate).
  */
 export class SourcePool {
-  #entries = new Map<string, { desc: Source; source: TextureSource }>();
+  #entries = new Map<string, { desc: Source; source: TextureSource; revision: number }>();
   #ctx: SourceContext;
 
   constructor(ctx: SourceContext) { this.#ctx = ctx; }
 
-  sync(gl: WebGL2RenderingContext, descs: readonly Source[]): void {
+  sync(gl: WebGL2RenderingContext, descs: readonly Source[], revisions: Readonly<Record<string, number>> = {}): void {
     const seen = new Set<string>();
     for (const desc of descs) {
       seen.add(desc.id);
       const existing = this.#entries.get(desc.id);
-      if (!existing) {
-        this.#entries.set(desc.id, { desc, source: createSource(desc, this.#ctx) });
+      const revision = revisions[desc.id] ?? 0;
+      if (!existing || existing.revision !== revision) {
+        existing?.source.dispose(gl);
+        this.#entries.set(desc.id, { desc, source: createSource(desc, this.#ctx), revision });
         continue;
       }
       if (existing.desc === desc) continue;
@@ -51,7 +53,7 @@ export class SourcePool {
         existing.desc = desc;
       } else {
         existing.source.dispose(gl);
-        this.#entries.set(desc.id, { desc, source: createSource(desc, this.#ctx) });
+        this.#entries.set(desc.id, { desc, source: createSource(desc, this.#ctx), revision });
       }
     }
     for (const [id, entry] of this.#entries) {

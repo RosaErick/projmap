@@ -43,6 +43,7 @@ export class Store {
     this.#state = {
       project,
       view: {
+        sourceRevisions: {},
         soloId: null,
         selectedIds: [],
         xray: false,
@@ -109,6 +110,7 @@ export class Store {
       project,
       view: {
         ...this.#state.view,
+        sourceRevisions: {},
         selectedIds: [],
         xray: false,
         playback: null,
@@ -639,6 +641,10 @@ export class Store {
 
   /** Aponta uma fonte de arquivo para outro arquivo — o "religar" do editor. */
   relinkSource(id: string, path: string): void {
+    const source = this.#state.project.sources.find((s) => s.id === id);
+    if (!source || !['canvas', 'image', 'gif', 'video'].includes(source.kind)) return;
+    const revisions = this.#state.view.sourceRevisions;
+    this.setView({ sourceRevisions: { ...revisions, [id]: (revisions[id] ?? 0) + 1 } });
     this.mutate((p) => {
       const s = p.sources.find((x) => x.id === id);
       if (!s) return;

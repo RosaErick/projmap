@@ -148,6 +148,8 @@ export interface Project {
  *  not part of the show. DECISION: keeping it out of Project means reopening a
  *  folder never leaves you staring at a single soloed surface. */
 export interface ViewState {
+  /** Session-only reload requests, including replacements at the same path. */
+  sourceRevisions: Record<string, number>;
   soloId: string | null;
   /**
    * Quem está selecionado agora, em ordem de escolha.

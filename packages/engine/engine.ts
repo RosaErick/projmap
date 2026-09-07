@@ -107,7 +107,7 @@ export class Engine {
     // only has anything to do when the source list itself changed — and when it
     // does, the store's notification has already marked the frame dirty.
     if (state.project.sources !== this.#syncedSources) {
-      this.pool.sync(gl, state.project.sources);
+      this.pool.sync(gl, state.project.sources, state.view.sourceRevisions);
       this.#syncedSources = state.project.sources;
     }
 
