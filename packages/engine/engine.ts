@@ -39,6 +39,7 @@ export class Engine {
   #win: Window;
   #raf = 0;
   #dirty = true;
+  #wasFading = false;
   #running = false;
   #view: ViewTransform = IDENTITY_VIEW;
   #unsubscribe: () => void;
@@ -120,7 +121,11 @@ export class Engine {
     // Uma transição muda a opacidade continuamente sem escrever no store, então
     // ela precisa acordar o laço explicitamente. "Tocando" não bastaria nem
     // seria certo: cena parada com conteúdo parado não tem por que segurar a GPU.
-    if (!this.#dirty && !uploaded && !this.pool.hasAnimated && !isFading(state)) return;
+    const fading = isFading(state);
+    // The first frame after a fade ends must draw its exact final state,
+    // even when the browser skipped the last part of the transition.
+    if (!this.#dirty && !uploaded && !this.pool.hasAnimated && !fading && !this.#wasFading) return;
+    this.#wasFading = fading;
     this.#dirty = false;
     this.renderFrame(state);
   }

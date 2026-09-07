@@ -91,6 +91,63 @@ check('AC-96: browser autosave survives reload with the folder API available',
   recovered.picker && recovered.surfaces === 1, JSON.stringify(recovered));
 await recoveryPage.close();
 
+// Drive the actual engine loop with deterministic frames; reading pixels must
+// not force a render, or the check would hide the missing final frame.
+const animationPage = await browser.newPage();
+await animationPage.goto(pathToFileURL(build).href);
+await animationPage.waitForFunction(() => Boolean(window.projMap));
+const fadeFrames = await animationPage.evaluate(() => {
+  const engine = window.projMap;
+  engine.stop();
+  const request = window.requestAnimationFrame;
+  const cancel = window.cancelAnimationFrame;
+  const clock = Date.now;
+  const render = engine.renderer.render.bind(engine.renderer);
+  let nextFrame;
+  let now = clock();
+  const pixels = [];
+  window.requestAnimationFrame = (fn) => { nextFrame = fn; return 1; };
+  window.cancelAnimationFrame = () => {};
+  Date.now = () => now;
+  try {
+    const { store } = engine;
+    const surface = store.addSurface();
+    store.addSource({ id: 'white', kind: 'color', name: '', rgb: [255, 255, 255] });
+    store.setSurfaceSource(surface.id, 'white');
+    store.captureScene('white');
+    store.patchScene(store.project.timeline.scenes[0].id, { fade: 1, hold: 0 });
+    store.setOpacity(surface.id, 0);
+    store.goToScene(0);
+    engine.resize(100, 100);
+    engine.setView({ scale: 0.04, tx: 0, ty: 0 });
+    engine.renderer.render = (...args) => {
+      render(...args);
+      const gl = engine.renderer.gl;
+      const pixel = new Uint8Array(4);
+      gl.readPixels(38, 78, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      pixels.push([...pixel]);
+    };
+    engine.start();
+    nextFrame();
+    now += 750;
+    nextFrame();
+    now += 500;
+    nextFrame();
+    nextFrame(); // A static scene must sleep again after its final frame.
+    return pixels;
+  } finally {
+    engine.stop();
+    engine.renderer.render = render;
+    window.requestAnimationFrame = request;
+    window.cancelAnimationFrame = cancel;
+    Date.now = clock;
+  }
+});
+check('AC-101: a fade draws its final pixels after skipped frames and then sleeps',
+  fadeFrames.length === 3 && fadeFrames[1][0] === 128 && fadeFrames[2][0] === 255,
+  JSON.stringify(fadeFrames));
+await animationPage.close();
+
 /** Reads a pixel straight out of the GL buffer, right after a forced frame. */
 async function pixel(x, y) {
   return page.evaluate(([px, py]) => {
