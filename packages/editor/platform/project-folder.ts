@@ -38,6 +38,7 @@ let dir: DirHandle | null = null;
 const urlCache = new Map<string, string>();
 /** Session-only media for the no-folder fallback, keyed by the same relative path. */
 const memoryFiles = new Map<string, File>();
+let importQueue: Promise<void> = Promise.resolve();
 
 export function folderName(): string { return dir?.name ?? ''; }
 
@@ -181,10 +182,36 @@ export async function resolveUrl(path: string): Promise<string> {
 }
 
 /** Copies a dropped file into the project folder and returns its relative path. */
-export async function importFile(file: File): Promise<string> {
-  const path = safeName(file.name);
-  if (dir) {
-    const handle = await dir.getFileHandle(path, { create: true });
+export function importFile(file: File): Promise<string> {
+  const target = dir;
+  // Serialize name allocation with writes, including simultaneous drops.
+  const imported = importQueue.then(() => copyFile(file, target));
+  importQueue = imported.then(() => {}, () => {});
+  return imported;
+}
+
+async function copyFile(file: File, target: DirHandle | null): Promise<string> {
+  const name = safeName(file.name);
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const extension = dot > 0 ? name.slice(dot) : '';
+  const exists = async (path: string): Promise<boolean> => {
+    if (!target) return memoryFiles.has(path);
+    try { await target.getFileHandle(path); return true; } catch (error) {
+      const code = (error as DOMException | null)?.name;
+      if (code === 'NotFoundError') return false;
+      if (code === 'TypeMismatchError') return true;
+      throw error;
+    }
+  };
+  let path = name;
+  let suffix = 2;
+  // project.json always belongs to the saver.
+  while (await exists(path) || path === 'project.json') {
+    path = `${stem}_${suffix++}${extension}`;
+  }
+  if (target) {
+    const handle = await target.getFileHandle(path, { create: true });
     const writable = await handle.createWritable();
     await writable.write(file);
     await writable.close();
