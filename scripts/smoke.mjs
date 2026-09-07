@@ -72,6 +72,25 @@ await page.waitForFunction(() => Boolean(window.projMap), null, { timeout: 10_00
 
 check('AC-14: build abre por file:// e monta a engine', true);
 
+// A fresh browser context has no folder handle, even when the picker exists.
+const recoveryPage = await browser.newPage({ locale: 'pt-BR' });
+await recoveryPage.goto(pathToFileURL(build).href);
+await recoveryPage.waitForFunction(() => Boolean(window.projMap));
+await recoveryPage.evaluate(() => window.projMap.store.addSurface());
+await recoveryPage.waitForFunction(() => {
+  const json = localStorage.getItem('map-engine:project');
+  return json && JSON.parse(json).surfaces.length === 1;
+});
+await recoveryPage.reload();
+await recoveryPage.waitForFunction(() => Boolean(window.projMap));
+const recovered = await recoveryPage.evaluate(() => ({
+  picker: typeof window.showDirectoryPicker === 'function',
+  surfaces: window.projMap.store.project.surfaces.length,
+}));
+check('AC-96: browser autosave survives reload with the folder API available',
+  recovered.picker && recovered.surfaces === 1, JSON.stringify(recovered));
+await recoveryPage.close();
+
 /** Reads a pixel straight out of the GL buffer, right after a forced frame. */
 async function pixel(x, y) {
   return page.evaluate(([px, py]) => {

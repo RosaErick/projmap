@@ -16,6 +16,13 @@
   initTheme();
   initLocale();
 
+  // DECISION: recover browser storage on every startup. A permitted folder
+  // takes precedence when restored below; API support alone is not a folder.
+  const saved = localProject();
+  if (saved) {
+    try { store.load(saved); } catch { /* Invalid autosave: start empty. */ }
+  }
+
   // O rótulo de "onde foi salvo" é cópia, então quem tem o catálogo é quem o
   // define — e ele acompanha a troca de idioma.
   $effect(() => {
@@ -60,8 +67,6 @@
   $effect(() => {
     if (!hasFileSystemAccess) {
       flash(t('warn.noFileSystemAccess'));
-      const saved = localProject();
-      if (saved) { try { store.load(saved); } catch { /* autosave corrompido, começa limpo */ } }
     }
   });
 
